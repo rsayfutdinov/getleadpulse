@@ -19,7 +19,11 @@
       mailchimp: true
     },
     // Custom fields configuration
-    customFields: {}
+    customFields: {},
+    // Tracking configuration
+    trackingEndpoint: window.location.origin + '/api/tracking',
+    apiKey: null, // Will be set from script tag
+    enableTracking: true // Enable/disable tracking
   };
 
   // Comprehensive traffic source database
@@ -509,6 +513,74 @@
     return attributionData;
   }
 
+  // Send tracking event to server
+  function sendTrackingEvent(eventType, additionalData) {
+    console.log('[LeadPulse] sendTrackingEvent called:', eventType);
+    
+    if (!config.enableTracking) {
+      console.log('[LeadPulse] Tracking is disabled');
+      return;
+    }
+
+    if (!config.apiKey) {
+      console.log('[LeadPulse] No API key found, skipping tracking');
+      return;
+    }
+
+    console.log('[LeadPulse] API key present:', config.apiKey.substring(0, 8) + '...');
+
+    const attributionData = utils.getLocalStorage(config.storageKey) || {};
+    const payload = {
+      apiKey: config.apiKey,
+      eventType: eventType, // 'init' or 'lead'
+      domain: window.location.hostname,
+      landingPage: window.location.pathname + window.location.search,
+      referrer: utils.getReferrer(),
+      channel: attributionData.channel || null,
+      subChannel: attributionData.subChannel || null,
+      utmSource: attributionData.utm_parameters?.utm_source || null,
+      utmMedium: attributionData.utm_parameters?.utm_medium || null,
+      utmCampaign: attributionData.utm_parameters?.utm_campaign || null,
+      utmTerm: attributionData.utm_parameters?.utm_term || null,
+      utmContent: attributionData.utm_parameters?.utm_content || null,
+      timestamp: new Date().toISOString()
+    };
+
+    // Merge additional data if provided
+    if (additionalData) {
+      Object.assign(payload, additionalData);
+    }
+
+    // Determine endpoint based on event type
+    const endpoint = eventType === 'lead' ? '/lead' : '/init';
+    const fullUrl = config.trackingEndpoint + endpoint;
+
+    console.log('[LeadPulse] Sending tracking request to:', fullUrl);
+    console.log('[LeadPulse] Payload:', payload);
+
+    // Send to tracking endpoint
+    fetch(fullUrl, {
+      method: 'POST',
+      headers: { 
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    })
+    .then(response => {
+      console.log('[LeadPulse] Response status:', response.status);
+      if (!response.ok) {
+        return response.text().then(text => {
+          console.error('[LeadPulse] Tracking request failed:', response.status, text);
+        });
+      } else {
+        console.log('[LeadPulse] ✅ Tracking event sent successfully:', eventType);
+      }
+    })
+    .catch(err => {
+      console.error('[LeadPulse] Tracking error:', err);
+    });
+  }
+
   // Auto-fill forms with attribution data
   function autoFillForms() {
     console.log('DEBUG: autoFillForms called');
@@ -774,30 +846,69 @@
     utils.log('Initializing LeadPulse...');
     
     // Check for API key in script tag
-    const scriptTag = document.currentScript || (function() {
+    // document.currentScript doesn't work after script execution
+    // So we search for the embed.js script tag
+    const scriptTag = (function() {
       const scripts = document.getElementsByTagName('script');
+      for (let i = 0; i < scripts.length; i++) {
+        if (scripts[i].src && scripts[i].src.includes('embed.js')) {
+          return scripts[i];
+        }
+      }
+      // Fallback to last script
       return scripts[scripts.length - 1];
     })();
     
     let apiKey = null;
+    console.log('[LeadPulse] Starting API key detection...');
+    console.log('[LeadPulse] document.currentScript:', document.currentScript);
+    
     if (scriptTag) {
       try {
-        const urlParts = scriptTag.src.split('?');
-        const queryString = urlParts.length > 1 ? urlParts[1] : '';
-        apiKey = new URLSearchParams(queryString).get('api_key');
-        if (apiKey) {
-          config.apiKey = apiKey;
-          utils.log('API key found in script tag:', apiKey);
+        console.log('[LeadPulse] Script tag found');
+        console.log('[LeadPulse] Script src:', scriptTag.src);
+        console.log('[LeadPulse] Script src type:', typeof scriptTag.src);
+        
+        if (!scriptTag.src) {
+          console.error('[LeadPulse] Script tag has no src attribute!');
+        } else {
+          const urlParts = scriptTag.src.split('?');
+          console.log('[LeadPulse] URL parts count:', urlParts.length);
+          console.log('[LeadPulse] URL parts:', urlParts);
+          
+          const queryString = urlParts.length > 1 ? urlParts[1] : '';
+          console.log('[LeadPulse] Query string:', queryString);
+          console.log('[LeadPulse] Query string length:', queryString.length);
+          
+          const urlParams = new URLSearchParams(queryString);
+          console.log('[LeadPulse] URLSearchParams object:', urlParams);
+          console.log('[LeadPulse] All params:', Array.from(urlParams.entries()));
+          
+          apiKey = urlParams.get('api_key');
+          console.log('[LeadPulse] Parsed API key:', apiKey);
+          console.log('[LeadPulse] API key type:', typeof apiKey);
+          console.log('[LeadPulse] API key length:', apiKey ? apiKey.length : 0);
+          
+          if (apiKey) {
+            config.apiKey = apiKey;
+            console.log('[LeadPulse] ✅ API key found in script tag:', apiKey.substring(0, 10) + '...');
+          } else {
+            console.error('[LeadPulse] ❌ API key not found in query string');
+          }
         }
       } catch (e) {
         console.error('[LeadPulse] Error parsing script URL:', e);
+        console.error('[LeadPulse] Error stack:', e.stack);
       }
+    } else {
+      console.error('[LeadPulse] Script tag not found');
     }
     
     // Early exit if no API key is available
     if (!apiKey) {
-      console.error('[LeadPulse] No API key provided. Please include api_key parameter in the script URL: https://bpuwjpgckgcxowylcfxv.supabase.co/storage/v1/object/public/getleadpulse.com//embed.js?api_key=YOUR_API_KEY');
-      return;
+      console.error('[LeadPulse] No API key provided. Waiting for manual configuration...');
+      // Don't return early - allow manual configuration
+      // return;
     }
     
     // Listen for custom events to set test referrer
@@ -820,6 +931,9 @@
       console.log('DEBUG: Using existing attribution data:', existingData);
     }
 
+    // Send init tracking event to server
+    sendTrackingEvent('init');
+
     // Auto-fill forms
     if (config.autoFill) {
       console.log('DEBUG: Auto-filling forms on init');
@@ -838,6 +952,12 @@
         console.log('DEBUG: Form submission detected, adding hidden fields');
         const data = getAttributionData();
         addHiddenFieldsToForm(e.target, data);
+        
+        // Send lead tracking event to server
+        sendTrackingEvent('lead', {
+          formId: e.target.id || 'unknown',
+          formAction: e.target.action || null
+        });
       }
     });
     
@@ -890,6 +1010,9 @@
 
   // Expose public API
   window.LeadPulse = {
+    init: function() {
+      init();
+    },
     track: function() {
       return config.apiKey ? trackAttribution() : console.error('[LeadPulse] Cannot track: No API key available');
     },
@@ -902,6 +1025,18 @@
     },
     configure: function(options) {
       Object.assign(config, options);
+      console.log('[LeadPulse] Configuration updated:', options);
+      // If API key is now set and we haven't initialized, do it now
+      if (options.apiKey && config.apiKey) {
+        console.log('[LeadPulse] API key configured, re-initializing...');
+        // Track attribution and send init event
+        trackAttribution();
+        sendTrackingEvent('init');
+        // Setup form listeners if not already done
+        if (config.autoFill) {
+          autoFillForms();
+        }
+      }
     },
     addHiddenFields: function(formId) {
       if (!config.apiKey) {
